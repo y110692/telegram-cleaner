@@ -12,7 +12,7 @@
 ## Запуск
 
 ```powershell
-cd "C:\Users\user\Desktop\Fav Tinder"
+cd /path/to/telegram-cleaner
 .\start_fav_tinder.ps1
 ```
 

@@ -13,7 +13,7 @@ Local Telegram Saved Messages organizer with swipe UI and Obsidian export.
 ## Run locally
 
 ```powershell
-cd "C:\Users\user\Desktop\Fav Tinder"
+cd /path/to/telegram-cleaner
 python .\fav_tinder_app\server.py
 ```
 
