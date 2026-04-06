@@ -1723,7 +1723,8 @@ function renderCard() {
     elements.swipeHints.classList.add("hidden");
     elements.emptyState.classList.remove("hidden");
     elements.emptyTitle.textContent = "Выберите папку экспорта";
-    elements.emptyCopy.textContent = "Открой папку с экспортом Telegram-чата. JSON и медиа подтянутся локально прямо в браузере.";
+    elements.emptyCopy.textContent =
+      "Браузер попросит доступ только к выбранной папке. JSON и медиа откроются локально на вашем устройстве и не отправляются на сервер.";
     elements.emptyPickExportBtn.classList.remove("hidden");
     elements.emptyDownloadOutputBtn.classList.add("hidden");
     syncStageVerticalAlignment();
