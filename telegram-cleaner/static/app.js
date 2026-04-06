@@ -2,12 +2,22 @@ const state = {
   items: [],
   decisions: {},
   tags: [],
+  customTags: [],
   queue: [],
   currentItem: null,
   exportReady: false,
   savePanelItem: null,
   savePanelTags: [],
   history: [],
+  exportFiles: new Map(),
+  mediaObjectUrls: new Map(),
+  exportMeta: {
+    key: "",
+    label: "",
+    basePath: "",
+    resultFile: "",
+  },
+  outputHandle: null,
   settings: {
     proMode: false,
     exportJsonPath: "",
@@ -16,16 +26,25 @@ const state = {
     defaultTags: [],
   },
   settingsDraftTags: [],
+  renderedItemId: null,
+  importStats: {
+    total: 0,
+    autoSkipped: 0,
+  },
 };
 
 const elements = {
   statTotal: document.getElementById("stat-total"),
   statLeft: document.getElementById("stat-left"),
+  statSkipped: document.getElementById("stat-skipped"),
+  statSkippedWrap: document.getElementById("stat-skipped-wrap"),
   statSaved: document.getElementById("stat-saved"),
   footerStats: document.querySelector(".footer-stats"),
   deleteBtn: document.getElementById("delete-btn"),
+  undoCardBtn: document.getElementById("undo-card-btn"),
   stageLayout: document.getElementById("stage-layout"),
   cardStage: document.getElementById("card-stage"),
+  stage: document.querySelector(".stage"),
   card: document.getElementById("message-card"),
   emptyState: document.getElementById("empty-state"),
   emptyTitle: document.getElementById("empty-title"),
@@ -52,17 +71,27 @@ const elements = {
   settingsModal: document.getElementById("settings-modal"),
   closeSettingsBtn: document.getElementById("close-settings-btn"),
   proModeBtn: document.getElementById("pro-mode-btn"),
-  proModeStatus: document.getElementById("pro-mode-status"),
   settingsExportPath: document.getElementById("settings-export-path"),
   settingsOutputPath: document.getElementById("settings-output-path"),
   pickExportBtn: document.getElementById("pick-export-btn"),
   openExportFolderBtn: document.getElementById("open-export-folder-btn"),
+  resetProgressBtn: document.getElementById("reset-progress-btn"),
   pickOutputBtn: document.getElementById("pick-output-btn"),
   openOutputFolderBtn: document.getElementById("open-output-folder-btn"),
+  exportFolderInput: document.getElementById("export-folder-input"),
   settingsTagsEditor: document.getElementById("settings-tags-editor"),
   settingsTagInput: document.getElementById("settings-tag-input"),
   saveSettingsTagsBtn: document.getElementById("save-settings-tags-btn"),
 };
+
+const DEFAULT_TAGS_FALLBACK = ["мысли", "дневник", "референс", "ссылка", "цитата"];
+const STORAGE_KEYS = {
+  settings: "fav-tinder.settings.v2",
+  decisionsPrefix: "fav-tinder.decisions.v2.",
+};
+const ATTACHMENTS_DIR_NAME = "Вложения";
+const OUTPUT_EXPORT_DIR_NAME = "telegram-cleaner-export";
+const MISSING_FILE_MARKER = "(File exceeds maximum size. Change data exporting settings to download.)";
 
 function escapeHtml(value) {
   return String(value)
@@ -114,9 +143,201 @@ function syncSettingsState(settings = {}) {
   state.settings.exportRoot = String(settings.export_root || "");
   state.exportReady = Boolean(settings.export_ready);
   state.settings.outputPath = String(settings.obsidian_output_path || "");
-  state.settings.defaultTags = Array.isArray(settings.default_tags) ? [...settings.default_tags] : [];
+  state.settings.defaultTags = normalizeSettingsTags(settings.default_tags);
   state.settingsDraftTags = [...state.settings.defaultTags];
   mergeKnownTags(state.settings.defaultTags);
+}
+
+function safeJsonParse(value, fallback) {
+  if (!value) {
+    return fallback;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeSettingsTags(rawTags) {
+  if (!Array.isArray(rawTags)) {
+    return [...DEFAULT_TAGS_FALLBACK];
+  }
+  const normalizedTags = [];
+  const seen = new Set();
+  for (const rawTag of rawTags) {
+    if (typeof rawTag !== "string") {
+      continue;
+    }
+    const cleaned = rawTag.trim();
+    const key = normalizeTagKey(cleaned);
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      normalizedTags.push(cleaned);
+    }
+  }
+  return normalizedTags.length ? normalizedTags : [...DEFAULT_TAGS_FALLBACK];
+}
+
+function storedSettingsPayload() {
+  const stored = safeJsonParse(localStorage.getItem(STORAGE_KEYS.settings), {});
+  return {
+    pro_mode: Boolean(stored.pro_mode),
+    default_tags: normalizeSettingsTags(stored.default_tags),
+  };
+}
+
+function currentSettingsPayload() {
+  const stored = storedSettingsPayload();
+  return {
+    ...stored,
+    export_json_path: state.exportMeta.label,
+    export_root: state.exportMeta.basePath,
+    export_ready: state.exportReady,
+    obsidian_output_path: state.settings.outputPath || "",
+  };
+}
+
+function persistSettingsPayload(settings) {
+  localStorage.setItem(
+    STORAGE_KEYS.settings,
+    JSON.stringify({
+      pro_mode: Boolean(settings.pro_mode),
+      default_tags: normalizeSettingsTags(settings.default_tags),
+    }),
+  );
+}
+
+function currentExportStorageKey() {
+  return state.exportMeta.key ? `${STORAGE_KEYS.decisionsPrefix}${state.exportMeta.key}` : "";
+}
+
+function rememberCustomTags(tags) {
+  const byKey = new Map(state.customTags.map((tag) => [normalizeTagKey(tag), tag]));
+  for (const tag of tags) {
+    const cleaned = String(tag || "").trim();
+    const key = normalizeTagKey(cleaned);
+    if (key && !byKey.has(key)) {
+      byKey.set(key, cleaned);
+    }
+  }
+  state.customTags = [...byKey.values()];
+}
+
+function rebuildKnownTags() {
+  const displayByTag = new Map();
+  for (const tag of state.settings.defaultTags) {
+    const key = normalizeTagKey(tag);
+    if (key) {
+      displayByTag.set(key, tag);
+    }
+  }
+  for (const tag of state.customTags) {
+    const key = normalizeTagKey(tag);
+    if (key) {
+      displayByTag.set(key, tag);
+    }
+  }
+  for (const decision of Object.values(state.decisions)) {
+    for (const tag of decision.tags || []) {
+      const key = normalizeTagKey(tag);
+      if (key) {
+        displayByTag.set(key, tag);
+      }
+    }
+  }
+
+  const counts = tagUsageCountMap();
+  const defaultOrder = new Map(state.settings.defaultTags.map((tag, index) => [normalizeTagKey(tag), index]));
+  state.tags = [...displayByTag.keys()]
+    .sort((left, right) => {
+      const leftCount = counts.get(left) || 0;
+      const rightCount = counts.get(right) || 0;
+      if (leftCount !== rightCount) {
+        return rightCount - leftCount;
+      }
+      const leftOrder = defaultOrder.has(left) ? defaultOrder.get(left) : state.settings.defaultTags.length + 1;
+      const rightOrder = defaultOrder.has(right) ? defaultOrder.get(right) : state.settings.defaultTags.length + 1;
+      if (leftOrder !== rightOrder) {
+        return leftOrder - rightOrder;
+      }
+      return String(displayByTag.get(left) || "").localeCompare(String(displayByTag.get(right) || ""), "ru");
+    })
+    .map((key) => displayByTag.get(key));
+}
+
+function persistCurrentExportState() {
+  const storageKey = currentExportStorageKey();
+  if (!storageKey) {
+    return;
+  }
+  localStorage.setItem(
+    storageKey,
+    JSON.stringify({
+      export_label: state.exportMeta.label,
+      custom_tags: state.customTags,
+      decisions: state.decisions,
+      updated_at: new Date().toISOString(),
+    }),
+  );
+}
+
+function restoreExportState(exportKey) {
+  const stored = safeJsonParse(localStorage.getItem(`${STORAGE_KEYS.decisionsPrefix}${exportKey}`), {});
+  state.decisions = stored && typeof stored.decisions === "object" && stored.decisions ? stored.decisions : {};
+  state.customTags = Array.isArray(stored.custom_tags) ? [...stored.custom_tags] : [];
+}
+
+async function resetCurrentExportProgress() {
+  const storageKey = currentExportStorageKey();
+  if (!storageKey) {
+    return;
+  }
+  localStorage.removeItem(storageKey);
+  state.decisions = {};
+  state.customTags = [];
+  state.history = [];
+  closeSavePanel();
+  rebuildKnownTags();
+  persistCurrentExportState();
+  await maybeRebuildOutput();
+  refreshQueue();
+  renderCard();
+  renderSavePanel();
+  renderSettingsModal();
+}
+
+function revokeMediaObjectUrls() {
+  for (const objectUrl of state.mediaObjectUrls.values()) {
+    URL.revokeObjectURL(objectUrl);
+  }
+  state.mediaObjectUrls.clear();
+}
+
+function clearImportedExport() {
+  revokeMediaObjectUrls();
+  state.items = [];
+  state.decisions = {};
+  state.customTags = [];
+  state.tags = [...state.settings.defaultTags];
+  state.queue = [];
+  state.currentItem = null;
+  state.history = [];
+  state.exportFiles = new Map();
+  state.exportMeta = {
+    key: "",
+    label: "",
+    basePath: "",
+    resultFile: "",
+  };
+  state.importStats = {
+    total: 0,
+    autoSkipped: 0,
+  };
+  state.exportReady = false;
+  syncSettingsState(currentSettingsPayload());
+  rebuildKnownTags();
+  closeSavePanel();
 }
 
 function getOrderedKnownTags() {
@@ -179,6 +400,482 @@ function collapseWhitespace(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeRelativePath(value) {
+  const normalized = String(value || "").replaceAll("\\", "/").replace(/^\.?\//, "").replace(/\/{2,}/g, "/").trim();
+  return normalized.replace(/^\/+/, "");
+}
+
+function basenameFromPath(value) {
+  const normalized = normalizeRelativePath(value);
+  const parts = normalized.split("/");
+  return parts[parts.length - 1] || "";
+}
+
+function dirnameFromPath(value) {
+  const normalized = normalizeRelativePath(value);
+  const lastSlash = normalized.lastIndexOf("/");
+  return lastSlash === -1 ? "" : normalized.slice(0, lastSlash);
+}
+
+function guessMimeType(relativePath) {
+  const extension = basenameFromPath(relativePath).toLowerCase().split(".").pop() || "";
+  const byExtension = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    bmp: "image/bmp",
+    dng: "image/x-adobe-dng",
+    mp4: "video/mp4",
+    mov: "video/quicktime",
+    mkv: "video/x-matroska",
+    webm: "video/webm",
+    mp3: "audio/mpeg",
+    m4a: "audio/mp4",
+    ogg: "audio/ogg",
+    oga: "audio/ogg",
+    opus: "audio/ogg",
+    wav: "audio/wav",
+    flac: "audio/flac",
+    pdf: "application/pdf",
+    txt: "text/plain",
+    json: "application/json",
+    tgs: "application/x-tgsticker",
+  };
+  return byExtension[extension] || "application/octet-stream";
+}
+
+function getFileByRelativePath(relativePath) {
+  return state.exportFiles.get(normalizeRelativePath(relativePath)) || null;
+}
+
+function existingRelativePath(value) {
+  const relativePath = normalizeRelativePath(value);
+  if (!relativePath || isMissingMarker(value)) {
+    return null;
+  }
+  return getFileByRelativePath(relativePath) ? relativePath : null;
+}
+
+function derivedPreview(fileRelative) {
+  if (!fileRelative) {
+    return null;
+  }
+  const directory = dirnameFromPath(fileRelative);
+  const name = basenameFromPath(fileRelative);
+  const previewPath = normalizeRelativePath(`${directory ? `${directory}/` : ""}${name}_thumb.jpg`);
+  return getFileByRelativePath(previewPath) ? previewPath : null;
+}
+
+function flattenText(value) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((chunk) => {
+        if (typeof chunk === "string") {
+          return chunk;
+        }
+        if (chunk && typeof chunk === "object") {
+          return String(chunk.text || "");
+        }
+        return "";
+      })
+      .join("");
+  }
+  return "";
+}
+
+function extractSegments(message) {
+  const entities = message?.text_entities;
+  if (Array.isArray(entities) && entities.length) {
+    return entities
+      .map((entity) => {
+        if (typeof entity === "string") {
+          return { type: "plain", text: entity };
+        }
+        if (!entity || typeof entity !== "object") {
+          return null;
+        }
+        const entityType = String(entity.type || "plain");
+        const text = String(entity.text || "");
+        const href = String(entity.href || "");
+        if (entityType === "link" || entityType === "text_link") {
+          return { type: "link", text, href: href || text };
+        }
+        if (entityType === "bold" || entityType === "italic" || entityType === "code") {
+          return { type: entityType, text };
+        }
+        return { type: "plain", text };
+      })
+      .filter(Boolean);
+  }
+  const flattened = flattenText(message?.text || "");
+  return flattened ? [{ type: "plain", text: flattened }] : [];
+}
+
+function extractLinks(segments) {
+  const seen = new Set();
+  const links = [];
+  for (const segment of segments) {
+    if (segment?.type !== "link") {
+      continue;
+    }
+    const href = String(segment.href || "").trim();
+    const text = String(segment.text || href).trim() || href;
+    const key = `${text}::${href}`;
+    if (href && !seen.has(key)) {
+      seen.add(key);
+      links.push({ text, href });
+    }
+  }
+  return links;
+}
+
+function isMissingMarker(value) {
+  return typeof value === "string" && value.trim() === MISSING_FILE_MARKER;
+}
+
+function formatDisplayDate(dateIso) {
+  const parsed = new Date(dateIso);
+  if (Number.isNaN(parsed.getTime())) {
+    return {
+      dateDisplay: String(dateIso || ""),
+      timeDisplay: "",
+    };
+  }
+  return {
+    dateDisplay: new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    }).format(parsed),
+    timeDisplay: new Intl.DateTimeFormat("ru-RU", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(parsed),
+  };
+}
+
+function detectMedia(message) {
+  const photoRelative = existingRelativePath(message?.photo);
+  const fileRelative = existingRelativePath(message?.file);
+  const thumbnailRelative = existingRelativePath(message?.thumbnail);
+  const mediaType = String(message?.media_type || "");
+  const mimeType = String(message?.mime_type || "");
+
+  if (photoRelative) {
+    return {
+      kind: "image",
+      media_type: "photo",
+      file_name: basenameFromPath(photoRelative),
+      source_path: photoRelative,
+      preview_path: photoRelative,
+      mime_type: mimeType || guessMimeType(photoRelative),
+      width: message?.width,
+      height: message?.height,
+      duration_seconds: message?.duration_seconds,
+      missing: false,
+    };
+  }
+
+  if (!fileRelative && !isMissingMarker(message?.file)) {
+    return null;
+  }
+
+  const previewRelative = thumbnailRelative || derivedPreview(fileRelative);
+  const suffix = basenameFromPath(fileRelative || String(message?.file_name || "")).toLowerCase();
+
+  let kind = "document";
+  if (["video_file", "video_message", "animation"].includes(mediaType) || mimeType.startsWith("video/")) {
+    kind = "video";
+  } else if (["voice_message", "audio_file"].includes(mediaType) || mimeType.startsWith("audio/")) {
+    kind = "audio";
+  } else if (mediaType === "sticker" || suffix.endsWith(".tgs") || suffix.endsWith(".webp")) {
+    kind = "sticker";
+  } else if (
+    mimeType.startsWith("image/") ||
+    [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".dng"].some((extension) => suffix.endsWith(extension))
+  ) {
+    kind = "image";
+  } else if (suffix.endsWith(".pdf")) {
+    kind = "pdf";
+  }
+
+  return {
+    kind,
+    media_type: mediaType || kind,
+    file_name: String(message?.file_name || basenameFromPath(fileRelative) || "missing-file"),
+    source_path: fileRelative,
+    preview_path: previewRelative,
+    mime_type: mimeType || guessMimeType(fileRelative || ""),
+    width: message?.width,
+    height: message?.height,
+    duration_seconds: message?.duration_seconds,
+    missing: !fileRelative,
+  };
+}
+
+function messageHasUnavailableMedia(message, media) {
+  if (media?.missing) {
+    return true;
+  }
+
+  const photoValue = message?.photo;
+  if (typeof photoValue === "string" && photoValue.trim() && !existingRelativePath(photoValue)) {
+    return true;
+  }
+
+  const fileValue = message?.file;
+  if (typeof fileValue === "string" && fileValue.trim() && !existingRelativePath(fileValue)) {
+    return true;
+  }
+
+  return false;
+}
+
+function inspectImportedMessage(message) {
+  if (message?.type !== "message") {
+    return {
+      countsAsPost: false,
+      autoSkipped: false,
+      item: null,
+    };
+  }
+
+  const segments = extractSegments(message);
+  const text = segments.map((segment) => segment.text || "").join("").trim();
+  const media = detectMedia(message);
+  const unavailableMedia = messageHasUnavailableMedia(message, media);
+
+  if (!text && !media && !unavailableMedia) {
+    return {
+      countsAsPost: false,
+      autoSkipped: false,
+      item: null,
+    };
+  }
+
+  if (unavailableMedia) {
+    return {
+      countsAsPost: true,
+      autoSkipped: true,
+      item: null,
+    };
+  }
+
+  const dateIso = String(message.date || "");
+  const { dateDisplay, timeDisplay } = formatDisplayDate(dateIso);
+  const links = extractLinks(segments);
+  const author = String(message.from || "").trim() || "Saved Messages";
+  const source = String(message.saved_from || message.forwarded_from || "").trim();
+
+  return {
+    countsAsPost: true,
+    autoSkipped: false,
+    item: {
+      id: Number(message.id),
+      date_iso: dateIso,
+      date_display: dateDisplay,
+      time_display: timeDisplay,
+      author,
+      source,
+      text,
+      segments,
+      links,
+      media,
+      edited_iso: message.edited || null,
+    },
+  };
+}
+
+function hashString(value) {
+  let hash = 5381;
+  for (const character of String(value || "")) {
+    hash = ((hash << 5) + hash) ^ character.charCodeAt(0);
+  }
+  return (hash >>> 0).toString(16);
+}
+
+function buildExportKey(exportData, label) {
+  const messages = Array.isArray(exportData?.messages) ? exportData.messages : [];
+  const first = messages[0] || {};
+  const last = messages[messages.length - 1] || {};
+  const signature = [
+    label,
+    exportData?.name || "",
+    messages.length,
+    first.id || "",
+    first.date || "",
+    last.id || "",
+    last.date || "",
+  ].join("|");
+  return hashString(signature);
+}
+
+function reportError(error) {
+  const message = error instanceof Error ? error.message : String(error || "Неизвестная ошибка");
+  console.error(error);
+  window.alert(message);
+}
+
+async function collectFilesFromDirectoryHandle(handle, prefix = "") {
+  const files = [];
+  for await (const [name, entry] of handle.entries()) {
+    const relativePath = normalizeRelativePath(prefix ? `${prefix}/${name}` : name);
+    if (entry.kind === "file") {
+      files.push({
+        file: await entry.getFile(),
+        relativePath,
+      });
+      continue;
+    }
+    if (entry.kind === "directory") {
+      files.push(...(await collectFilesFromDirectoryHandle(entry, relativePath)));
+    }
+  }
+  return files;
+}
+
+async function importFromCollectedFiles(files, label) {
+  const preparedFiles = files
+    .map(({ file, relativePath }) => ({
+      file,
+      relativePath: normalizeRelativePath(relativePath),
+    }))
+    .filter((entry) => entry.file && entry.relativePath);
+
+  const resultCandidates = preparedFiles
+    .filter((entry) => basenameFromPath(entry.relativePath).toLowerCase() === "result.json")
+    .sort((left, right) => left.relativePath.length - right.relativePath.length);
+
+  if (!resultCandidates.length) {
+    throw new Error("В выбранной папке не найден result.json");
+  }
+
+  const resultEntry = resultCandidates[0];
+  const basePath = dirnameFromPath(resultEntry.relativePath);
+  const exportFiles = new Map();
+  for (const entry of preparedFiles) {
+    const withinBase = !basePath || entry.relativePath === basePath || entry.relativePath.startsWith(`${basePath}/`);
+    if (!withinBase) {
+      continue;
+    }
+    const rebasedPath = basePath ? entry.relativePath.slice(basePath.length + 1) : entry.relativePath;
+    exportFiles.set(normalizeRelativePath(rebasedPath), entry.file);
+  }
+
+  const resultFile = exportFiles.get("result.json");
+  if (!resultFile) {
+    throw new Error("Не удалось открыть result.json внутри выбранной папки");
+  }
+
+  const exportData = safeJsonParse(await resultFile.text(), null);
+  if (!exportData || !Array.isArray(exportData.messages)) {
+    throw new Error("result.json не похож на экспорт Telegram");
+  }
+
+  const previousExportFiles = state.exportFiles;
+  state.exportFiles = exportFiles;
+  let items;
+  let importStats;
+  try {
+    const inspectedMessages = exportData.messages.map((message) => inspectImportedMessage(message));
+    items = sortByDateAsc(inspectedMessages.map((entry) => entry.item).filter(Boolean));
+    importStats = {
+      total: inspectedMessages.filter((entry) => entry.countsAsPost).length,
+      autoSkipped: inspectedMessages.filter((entry) => entry.autoSkipped).length,
+    };
+  } catch (error) {
+    state.exportFiles = previousExportFiles;
+    throw error;
+  }
+
+  const exportLabel = basePath ? `${label}/${basePath}` : label;
+  return {
+    items,
+    importStats,
+    exportMeta: {
+      key: buildExportKey(exportData, exportLabel),
+      label: exportLabel,
+      basePath: exportLabel,
+      resultFile: resultEntry.relativePath,
+    },
+  };
+}
+
+async function applyImportedExport(imported) {
+  revokeMediaObjectUrls();
+  state.items = imported.items;
+  state.importStats = imported.importStats || {
+    total: imported.items.length,
+    autoSkipped: 0,
+  };
+  state.exportMeta = imported.exportMeta;
+  state.exportReady = true;
+  state.history = [];
+  restoreExportState(imported.exportMeta.key);
+  const availableIds = new Set(state.items.map((item) => String(item.id)));
+  state.decisions = Object.fromEntries(
+    Object.entries(state.decisions).filter(([messageId]) => availableIds.has(messageId)),
+  );
+  syncSettingsState(currentSettingsPayload());
+  rebuildKnownTags();
+  refreshQueue();
+  renderCard();
+  renderSavePanel();
+  renderSettingsModal();
+  await maybeRebuildOutput();
+}
+
+async function importFromDirectoryHandle(handle) {
+  const files = await collectFilesFromDirectoryHandle(handle);
+  const imported = await importFromCollectedFiles(files, handle.name || "Выбранная папка");
+  await applyImportedExport(imported);
+}
+
+async function importFromFileList(fileList) {
+  const files = Array.from(fileList || []).map((file) => ({
+    file,
+    relativePath: normalizeRelativePath(file.webkitRelativePath || file.name),
+  }));
+  if (!files.length) {
+    return;
+  }
+  const rootLabel = files[0].relativePath.includes("/") ? files[0].relativePath.split("/")[0] : "Выбранная папка";
+  const strippedFiles = files.map((entry) => {
+    const relativePath = entry.relativePath.startsWith(`${rootLabel}/`)
+      ? entry.relativePath.slice(rootLabel.length + 1)
+      : entry.relativePath;
+    return {
+      file: entry.file,
+      relativePath,
+    };
+  });
+  const imported = await importFromCollectedFiles(strippedFiles, rootLabel);
+  await applyImportedExport(imported);
+}
+
+async function pickExportFolder() {
+  if (typeof window.showDirectoryPicker === "function") {
+    const handle = await window.showDirectoryPicker({
+      id: "telegram-export",
+      mode: "read",
+    });
+    await importFromDirectoryHandle(handle);
+    return;
+  }
+
+  if (!elements.exportFolderInput) {
+    throw new Error("Текущий браузер не поддерживает выбор папки");
+  }
+
+  elements.exportFolderInput.click();
+}
+
 const TAG_PALETTE = [
   { bg: "rgba(255, 214, 220, 0.32)", border: "rgba(255, 185, 195, 0.56)", text: "#ffeef2" },
   { bg: "rgba(255, 230, 199, 0.3)", border: "rgba(255, 206, 158, 0.56)", text: "#fff4e8" },
@@ -223,11 +920,20 @@ function leftAction() {
   return isProMode() ? "delete" : "skip";
 }
 
+function resetStageScroll() {
+  if (elements.stage) {
+    elements.stage.scrollTop = 0;
+  }
+}
+
 function syncStageVerticalAlignment() {
-  const stage = elements.cardStage;
-  if (!stage) {
+  const layout = elements.stageLayout;
+  if (!layout) {
     return;
   }
+  layout.classList.remove("is-overflowing");
+  layout.style.paddingTop = "";
+  layout.style.paddingBottom = "";
 }
 
 function getDecision(itemId) {
@@ -249,11 +955,43 @@ function isInteractiveTarget(target) {
 }
 
 function mediaSourcePath(media) {
-  return media?.source_path ? `/source/${encodeURI(media.source_path)}` : null;
+  if (!media?.source_path) {
+    return null;
+  }
+  const relativePath = normalizeRelativePath(media.source_path);
+  if (!relativePath) {
+    return null;
+  }
+  if (state.mediaObjectUrls.has(relativePath)) {
+    return state.mediaObjectUrls.get(relativePath);
+  }
+  const file = getFileByRelativePath(relativePath);
+  if (!file) {
+    return null;
+  }
+  const objectUrl = URL.createObjectURL(file);
+  state.mediaObjectUrls.set(relativePath, objectUrl);
+  return objectUrl;
 }
 
 function mediaPreviewPath(media) {
-  return media?.preview_path ? `/source/${encodeURI(media.preview_path)}` : null;
+  if (!media?.preview_path) {
+    return null;
+  }
+  const relativePath = normalizeRelativePath(media.preview_path);
+  if (!relativePath) {
+    return null;
+  }
+  if (state.mediaObjectUrls.has(relativePath)) {
+    return state.mediaObjectUrls.get(relativePath);
+  }
+  const file = getFileByRelativePath(relativePath);
+  if (!file) {
+    return null;
+  }
+  const objectUrl = URL.createObjectURL(file);
+  state.mediaObjectUrls.set(relativePath, objectUrl);
+  return objectUrl;
 }
 
 function isVoiceMessage(media) {
@@ -266,23 +1004,55 @@ function isRoundVideo(media) {
 
 function renderStats() {
   elements.footerStats.classList.toggle("hidden", !state.exportReady);
-  const total = state.items.length;
+  const total = state.importStats.total || state.items.length;
   const left = state.queue.length;
+  const skippedByUser = Object.values(state.decisions).filter((decision) => decision.action === "skip").length;
+  const autoSkipped = state.importStats.autoSkipped || 0;
+  const skipped = skippedByUser + autoSkipped;
   const saved = Object.values(state.decisions).filter((decision) => decision.action === "save").length;
 
   elements.statTotal.textContent = total;
   elements.statLeft.textContent = left;
+  elements.statSkipped.textContent = skipped;
   elements.statSaved.textContent = saved;
+
+  if (elements.statSkippedWrap) {
+    const tooltipParts = [];
+    if (autoSkipped > 0) {
+      tooltipParts.push(
+        `Автоматически скрыто ${autoSkipped}: в экспорте есть запись, но отсутствует локальный файл фото, видео или документа.`,
+      );
+    }
+    if (skippedByUser > 0) {
+      tooltipParts.push(`Вы пропустили вручную: ${skippedByUser}.`);
+    }
+    if (!tooltipParts.length) {
+      tooltipParts.push("Здесь показываются ручные пропуски и авто-скрытые записи без локальных файлов.");
+    }
+    const tooltipText = tooltipParts.join("\n");
+    elements.statSkippedWrap.dataset.tooltip = tooltipText;
+    elements.statSkippedWrap.title = tooltipText;
+  }
+}
+
+function renderUndoButton() {
+  if (!elements.undoCardBtn) {
+    return;
+  }
+  const canUndo = state.history.length > 0;
+  elements.undoCardBtn.disabled = !canUndo;
+  elements.undoCardBtn.classList.toggle("hidden", !state.exportReady);
 }
 
 function renderActionButtons() {
   const proMode = isProMode();
   elements.deleteBtn.classList.toggle("hidden", !proMode);
   elements.proModeBtn.classList.toggle("active", proMode);
-  elements.proModeStatus.textContent = proMode ? "Вкл" : "Выкл";
-  const skipIcon = elements.skipBtn?.querySelector("svg");
-  if (skipIcon) {
-    skipIcon.innerHTML = proMode
+  elements.proModeBtn.setAttribute("aria-pressed", proMode ? "true" : "false");
+
+  const skipMainIcon = elements.skipBtn?.querySelector(".hint-main-icon");
+  if (skipMainIcon) {
+    skipMainIcon.innerHTML = proMode
       ? '<line x1="12" y1="5" x2="12" y2="19"></line><polyline points="5 12 12 19 19 12"></polyline>'
       : '<line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline>';
   }
@@ -300,9 +1070,13 @@ function truncateMiddle(value, maxLength = 74) {
 
 function renderSettingsModal() {
   renderActionButtons();
-  elements.settingsExportPath.textContent = truncateMiddle(state.settings.exportJsonPath || "Не выбран");
-  elements.settingsOutputPath.textContent = truncateMiddle(state.settings.outputPath || "Не выбрана");
+  elements.settingsExportPath.textContent = truncateMiddle(state.settings.exportJsonPath || "Не выбрана");
+  elements.settingsOutputPath.textContent = truncateMiddle(
+    state.settings.outputPath || "Не выбрана. После выбора markdown и вложения будут писаться локально.",
+  );
   elements.openExportFolderBtn.disabled = !state.exportReady;
+  elements.resetProgressBtn.disabled = !state.exportReady;
+  elements.openOutputFolderBtn.disabled = !state.outputHandle || !state.exportReady;
   elements.settingsTagsEditor.innerHTML = "";
 
   for (const tag of state.settingsDraftTags) {
@@ -779,13 +1553,16 @@ function renderLinks(item) {
 
 function renderCard() {
   renderStats();
+  renderUndoButton();
   renderActionButtons();
+  resetStageScroll();
   if (!state.exportReady) {
+    state.renderedItemId = null;
     elements.card.classList.add("hidden");
     elements.swipeHints.classList.add("hidden");
     elements.emptyState.classList.remove("hidden");
-    elements.emptyTitle.textContent = "Выберите export";
-    elements.emptyCopy.textContent = "Открой result.json из папки экспорта Telegram, и здесь сразу появится карточка сообщения.";
+    elements.emptyTitle.textContent = "Выберите папку экспорта";
+    elements.emptyCopy.textContent = "Открой папку с экспортом Telegram-чата. JSON и медиа подтянутся локально прямо в браузере.";
     elements.emptyPickExportBtn.classList.remove("hidden");
     syncStageVerticalAlignment();
     return;
@@ -793,6 +1570,7 @@ function renderCard() {
 
   const item = state.currentItem;
   if (!item) {
+    state.renderedItemId = null;
     elements.card.classList.add("hidden");
     elements.swipeHints.classList.add("hidden");
     elements.emptyState.classList.remove("hidden");
@@ -807,6 +1585,7 @@ function renderCard() {
   elements.card.classList.remove("hidden");
   elements.swipeHints.classList.toggle("hidden", Boolean(state.savePanelItem));
   elements.card.style.transform = "";
+  state.renderedItemId = item.id;
   elements.messageDate.textContent = item.date_display;
   elements.messageTime.textContent = item.time_display;
 
@@ -912,12 +1691,8 @@ function renderSavePanel() {
 }
 
 async function loadBootstrap() {
-  const response = await fetch("/api/bootstrap");
-  const payload = await response.json();
-  state.items = sortByDateAsc(payload.items);
-  state.decisions = payload.decisions;
-  state.tags = Array.isArray(payload.tags) ? payload.tags : [];
-  syncSettingsState(payload.settings || {});
+  syncSettingsState(currentSettingsPayload());
+  rebuildKnownTags();
   refreshQueue();
   renderCard();
   renderSavePanel();
@@ -925,83 +1700,343 @@ async function loadBootstrap() {
 }
 
 async function updateSettings(nextSettings) {
-  const response = await fetch("/api/settings", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(nextSettings),
-  });
-  const payload = await response.json();
-  if (!payload.ok) {
-    throw new Error(payload.error || "Не удалось сохранить настройки");
+  const settings = storedSettingsPayload();
+  if (Object.prototype.hasOwnProperty.call(nextSettings, "pro_mode")) {
+    settings.pro_mode = Boolean(nextSettings.pro_mode);
   }
-  syncSettingsState(payload.settings || {});
-  if (Array.isArray(payload.tags)) {
-    state.tags = payload.tags;
+  if (Object.prototype.hasOwnProperty.call(nextSettings, "default_tags")) {
+    settings.default_tags = normalizeSettingsTags(nextSettings.default_tags);
   }
-  mergeKnownTags(state.settings.defaultTags);
+  persistSettingsPayload(settings);
+  syncSettingsState(currentSettingsPayload());
+  rebuildKnownTags();
   renderSettingsModal();
   renderSavePanel();
   renderCard();
 }
 
-async function invokeSettingsAction(path, payload = {}) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  const result = await response.json();
-  if (!result.ok) {
-    if (result.cancelled) {
-      return null;
+function safePathComponent(value, fallback = "item") {
+  const cleaned = String(value || "")
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "");
+  return cleaned || fallback;
+}
+
+function slugifyTag(tag) {
+  return safePathComponent(String(tag || "").toLocaleLowerCase("ru"), "tag")
+    .replaceAll(" ", "-")
+    .replace(/-{2,}/g, "-");
+}
+
+function normalizeLinkForFilename(href) {
+  try {
+    const parsed = new URL(href);
+    const host = (parsed.hostname || parsed.host || "").replace(/^www\./, "");
+    const pathParts = parsed.pathname.split("/").filter(Boolean);
+    const queryParts = [];
+    if (parsed.search) {
+      queryParts.push(parsed.search.slice(1).replaceAll("&", "_").replaceAll("=", "-"));
     }
-    throw new Error(result.error || "Не удалось выполнить действие");
+    if (parsed.hash) {
+      queryParts.push(parsed.hash.slice(1));
+    }
+    const parts = [host, ...pathParts, ...queryParts].filter(Boolean);
+    return parts.map((part) => safePathComponent(part, "link")).slice(0, 6).join("_") || "link";
+  } catch {
+    return safePathComponent(String(href || "").replace(/^https?:\/\//, ""), "link");
   }
-  if (result.settings) {
-    syncSettingsState(result.settings);
-    renderSettingsModal();
+}
+
+function mediaLabel(media) {
+  if (!media) {
+    return "Пост";
   }
-  return result;
+  const labels = {
+    image: "Фото",
+    video: "Видео",
+    audio: "Аудио",
+    sticker: "Стикер",
+    pdf: "PDF",
+    document: "Документ",
+  };
+  return labels[media.kind] || "Файл";
+}
+
+function deriveNoteTitleFragment(item) {
+  const text = collapseWhitespace(item?.text || "");
+  const links = Array.isArray(item?.links) ? item.links : [];
+  if (links.length) {
+    const firstLink = links[0].href;
+    if (!text || text === firstLink || text === links[0].text || text === String(links[0].text || "").trim()) {
+      return safePathComponent(`Ссылка_${normalizeLinkForFilename(firstLink)}`, `message-${item.id}`);
+    }
+  }
+  if (text) {
+    return safePathComponent(text.slice(0, 50), `message-${item.id}`);
+  }
+  return safePathComponent(mediaLabel(item?.media), `message-${item.id}`);
+}
+
+function makeNoteStem(item) {
+  const parsed = new Date(item.date_iso);
+  if (Number.isNaN(parsed.getTime())) {
+    return `${item.id}_${deriveNoteTitleFragment(item).slice(0, 120)}`;
+  }
+  const parts = [
+    parsed.getFullYear(),
+    String(parsed.getMonth() + 1).padStart(2, "0"),
+    String(parsed.getDate()).padStart(2, "0"),
+    "_",
+    String(parsed.getHours()).padStart(2, "0"),
+    String(parsed.getMinutes()).padStart(2, "0"),
+    String(parsed.getSeconds()).padStart(2, "0"),
+  ].join("");
+  return `${parts}_${deriveNoteTitleFragment(item).slice(0, 120)}`;
+}
+
+function renderSegmentsForMarkdown(segments) {
+  const parts = [];
+  for (const segment of segments || []) {
+    const segmentType = segment?.type || "plain";
+    const text = segment?.text || "";
+    if (!text) {
+      continue;
+    }
+    if (segmentType === "link") {
+      parts.push(`[${text}](${segment.href || text})`);
+    } else if (segmentType === "bold") {
+      parts.push(`**${text}**`);
+    } else if (segmentType === "italic") {
+      parts.push(`*${text}*`);
+    } else if (segmentType === "code") {
+      parts.push(`\`${text}\``);
+    } else {
+      parts.push(text);
+    }
+  }
+  return parts.join("").trim();
+}
+
+function renderNote(item, tags, mediaFiles, comment) {
+  const lines = ["---", "tags:"];
+  for (const tag of tags) {
+    lines.push(`  - ${JSON.stringify(tag)}`);
+  }
+  if (item.media) {
+    lines.push(`media_kind: ${item.media.kind}`);
+  }
+  lines.push("---", "", `#${item.id} | | ${String(item.date_iso || "").replace("T", " ")}`, "");
+
+  let authorLine = `**Автор:** ${item.author}`;
+  if (item.source) {
+    authorLine += ` | | ${item.source}`;
+  }
+  lines.push(authorLine, "");
+
+  if (comment) {
+    lines.push("## Комментарий", "", comment, "");
+  }
+
+  if (item.text) {
+    lines.push("## Содержимое", "", renderSegmentsForMarkdown(item.segments) || item.text, "");
+  }
+
+  if (item.links?.length) {
+    lines.push("## Ссылки", "");
+    for (const link of item.links) {
+      lines.push(`- [${link.text}](${link.href})`);
+    }
+    lines.push("");
+  }
+
+  if (item.media) {
+    lines.push("## Медиа", "", `Тип: \`${item.media.kind}\``, "");
+    if (item.media.missing) {
+      lines.push("Файл отсутствует в экспорте Telegram. В заметке сохранена только карточка сообщения.", "");
+    } else {
+      const mainName = mediaFiles.main;
+      const previewName = mediaFiles.preview;
+      if (mainName) {
+        lines.push(`[Открыть файл](./${ATTACHMENTS_DIR_NAME}/${mainName})`, "");
+      }
+      if ((item.media.kind === "image" || item.media.kind === "sticker") && mainName) {
+        lines.push(`![](./${ATTACHMENTS_DIR_NAME}/${mainName})`, "");
+      } else if (item.media.kind === "video" && mainName) {
+        if (previewName) {
+          lines.push(`![](./${ATTACHMENTS_DIR_NAME}/${previewName})`, "");
+        }
+        lines.push(`<video controls preload="metadata" src="./${ATTACHMENTS_DIR_NAME}/${mainName}"></video>`, "");
+      } else if (item.media.kind === "audio" && mainName) {
+        lines.push(`<audio controls preload="metadata" src="./${ATTACHMENTS_DIR_NAME}/${mainName}"></audio>`, "");
+      } else if (previewName) {
+        lines.push(`![](./${ATTACHMENTS_DIR_NAME}/${previewName})`, "");
+      }
+    }
+  }
+
+  return `${lines.join("\n").trim()}\n`;
+}
+
+async function ensureDirectory(parentHandle, name) {
+  return parentHandle.getDirectoryHandle(name, { create: true });
+}
+
+async function clearDirectoryHandle(handle) {
+  const entryNames = [];
+  for await (const [name] of handle.entries()) {
+    entryNames.push(name);
+  }
+  for (const name of entryNames) {
+    await handle.removeEntry(name, { recursive: true });
+  }
+}
+
+async function writeTextFile(handle, name, content) {
+  const fileHandle = await handle.getFileHandle(name, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(content);
+  await writable.close();
+}
+
+async function writeBinaryFile(handle, name, file) {
+  const fileHandle = await handle.getFileHandle(name, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(await file.arrayBuffer());
+  await writable.close();
+}
+
+async function copyAsset(relativePath, targetDir, messageId) {
+  const sourceFile = getFileByRelativePath(relativePath);
+  if (!sourceFile) {
+    return null;
+  }
+  const safeName = safePathComponent(sourceFile.name, `${messageId}`);
+  const targetName = `${messageId}_${safeName}`;
+  await writeBinaryFile(targetDir, targetName, sourceFile);
+  return targetName;
+}
+
+async function rebuildDeleteCandidates(rootHandle) {
+  const deleteIds = Object.entries(state.decisions)
+    .filter(([, decision]) => decision?.action === "delete")
+    .map(([messageId]) => Number(messageId))
+    .sort((left, right) => left - right);
+
+  const payload = {
+    updated_at: new Date().toISOString(),
+    export_root: state.exportMeta.label,
+    export_json_path: state.exportMeta.label ? `${state.exportMeta.label}/result.json` : "result.json",
+    message_ids: deleteIds,
+  };
+  await writeTextFile(rootHandle, "delete_message_ids.json", `${JSON.stringify(payload, null, 2)}\n`);
+  const textContent = deleteIds.length ? `${deleteIds.join("\n")}\n` : "";
+  await writeTextFile(rootHandle, "delete_message_ids.txt", textContent);
+}
+
+async function rebuildTagExports() {
+  if (!state.outputHandle) {
+    return;
+  }
+
+  const exportRoot = await ensureDirectory(state.outputHandle, OUTPUT_EXPORT_DIR_NAME);
+  await clearDirectoryHandle(exportRoot);
+
+  const savedEntries = Object.entries(state.decisions)
+    .filter(([, decision]) => decision?.action === "save")
+    .map(([messageId, decision]) => ({
+      item: state.items.find((candidate) => candidate.id === Number(messageId)),
+      decision,
+    }))
+    .filter((entry) => entry.item && Array.isArray(entry.decision.tags) && entry.decision.tags.length)
+    .sort((left, right) => {
+      if (left.item.date_iso === right.item.date_iso) {
+        return right.item.id - left.item.id;
+      }
+      return left.item.date_iso < right.item.date_iso ? 1 : -1;
+    });
+
+  for (const { item, decision } of savedEntries) {
+    const tags = decision.tags || [];
+    const mainTag = tags[0];
+    const tagFolder = await ensureDirectory(exportRoot, slugifyTag(mainTag));
+    const attachmentsDir = await ensureDirectory(tagFolder, ATTACHMENTS_DIR_NAME);
+
+    const media = item.media;
+    const mediaFiles = {};
+    if (media && !media.missing) {
+      if (media.source_path) {
+        const copiedMain = await copyAsset(media.source_path, attachmentsDir, item.id);
+        if (copiedMain) {
+          mediaFiles.main = copiedMain;
+        }
+      }
+      if (media.preview_path && media.preview_path !== media.source_path) {
+        const copiedPreview = await copyAsset(media.preview_path, attachmentsDir, item.id);
+        if (copiedPreview) {
+          mediaFiles.preview = copiedPreview;
+        }
+      }
+    }
+
+    const noteName = `${makeNoteStem(item)}.md`;
+    const noteContent = renderNote(item, tags, mediaFiles, String(decision.comment || "").trim());
+    await writeTextFile(tagFolder, noteName, noteContent);
+  }
+
+  await rebuildDeleteCandidates(exportRoot);
+}
+
+async function maybeRebuildOutput() {
+  if (!state.outputHandle) {
+    return;
+  }
+  await rebuildTagExports();
 }
 
 async function sendDecision(item, action, tags = [], comment = "", options = {}) {
   const { recordHistory = true } = options;
   const previous = state.decisions[String(item.id)] || null;
-  const response = await fetch("/api/decision", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      message_id: item.id,
-      action,
-      tags,
-      comment,
-    }),
-  });
-  const payload = await response.json();
-  if (!payload.ok) {
-    throw new Error(payload.error || "Не удалось записать действие");
-  }
 
   if (action === "clear") {
     delete state.decisions[String(item.id)];
   } else {
-    state.decisions[String(item.id)] = payload.decision;
+    const normalizedTags = [];
+    const seenTags = new Set();
+    for (const rawTag of tags) {
+      const cleaned = String(rawTag || "").trim();
+      const key = normalizeTagKey(cleaned);
+      if (key && !seenTags.has(key)) {
+        seenTags.add(key);
+        normalizedTags.push(cleaned);
+      }
+    }
+
+    state.decisions[String(item.id)] = {
+      action,
+      updated_at: new Date().toISOString(),
+      tags: action === "save" ? normalizedTags : [],
+      comment: action === "save" ? String(comment || "").trim() : "",
+      message_id: item.id,
+      date_iso: item.date_iso,
+      text_preview: item.text.length > 140 ? `${item.text.slice(0, 140)}…` : item.text,
+      media_kind: item.media?.kind || null,
+    };
   }
 
   if (action === "save") {
-    mergeKnownTags(tags);
+    rememberCustomTags(tags);
   }
+
+  rebuildKnownTags();
+  persistCurrentExportState();
 
   if (recordHistory) {
     state.history.unshift({ item, previous });
   }
 
+  await maybeRebuildOutput();
   refreshQueue();
   renderCard();
   renderSavePanel();
@@ -1058,6 +2093,9 @@ async function submitSavePanel() {
 function registerButtons() {
   elements.cancelSaveBtn.addEventListener("click", closeSavePanel);
   elements.confirmSaveBtn.addEventListener("click", submitSavePanel);
+  elements.undoCardBtn?.addEventListener("click", async () => {
+    await undoLastAction();
+  });
   elements.deleteBtn.addEventListener("click", async () => {
     await handleAction("delete");
   });
@@ -1078,52 +2116,68 @@ function registerButtons() {
     try {
       await updateSettings({ pro_mode: !isProMode() });
     } catch (error) {
-      console.error(error);
+      reportError(error);
     }
   });
   elements.pickExportBtn.addEventListener("click", async () => {
     try {
-      const result = await invokeSettingsAction("/api/settings/export/pick");
-      if (result) {
-        closeSavePanel();
-        await loadBootstrap();
-      }
+      closeSavePanel();
+      await pickExportFolder();
     } catch (error) {
-      console.error(error);
+      if (error?.name !== "AbortError") {
+        reportError(error);
+      }
     }
   });
   elements.emptyPickExportBtn.addEventListener("click", async () => {
     try {
-      const result = await invokeSettingsAction("/api/settings/export/pick");
-      if (result) {
-        await loadBootstrap();
-      }
+      await pickExportFolder();
     } catch (error) {
-      console.error(error);
+      if (error?.name !== "AbortError") {
+        reportError(error);
+      }
     }
   });
-  elements.openExportFolderBtn.addEventListener("click", async () => {
+  elements.resetProgressBtn?.addEventListener("click", async () => {
     try {
-      await invokeSettingsAction("/api/settings/open", { kind: "export" });
+      await resetCurrentExportProgress();
     } catch (error) {
-      console.error(error);
+      reportError(error);
     }
+  });
+  elements.openExportFolderBtn.addEventListener("click", () => {
+    clearImportedExport();
+    rebuildKnownTags();
+    renderCard();
+    renderSavePanel();
+    renderSettingsModal();
   });
   elements.pickOutputBtn.addEventListener("click", async () => {
     try {
-      const result = await invokeSettingsAction("/api/settings/output/pick");
-      if (result) {
-        await loadBootstrap();
+      if (typeof window.showDirectoryPicker !== "function") {
+        throw new Error("Для локального markdown-экспорта нужен браузер Chromium с File System Access API");
+      }
+      const handle = await window.showDirectoryPicker({
+        id: "telegram-cleaner-output",
+        mode: "readwrite",
+      });
+      state.outputHandle = handle;
+      state.settings.outputPath = `${handle.name}/${OUTPUT_EXPORT_DIR_NAME}`;
+      renderSettingsModal();
+      if (state.exportReady) {
+        await rebuildTagExports();
       }
     } catch (error) {
-      console.error(error);
+      if (error?.name !== "AbortError") {
+        reportError(error);
+      }
     }
   });
   elements.openOutputFolderBtn.addEventListener("click", async () => {
     try {
-      await invokeSettingsAction("/api/settings/open", { kind: "output" });
+      await rebuildTagExports();
     } catch (error) {
-      console.error(error);
+      reportError(error);
     }
   });
   elements.saveSettingsTagsBtn.addEventListener("click", async () => {
@@ -1131,7 +2185,7 @@ function registerButtons() {
       commitSettingsTagInput();
       await updateSettings({ default_tags: [...state.settingsDraftTags] });
     } catch (error) {
-      console.error(error);
+      reportError(error);
     }
   });
   elements.settingsTagInput.addEventListener("keydown", async (event) => {
@@ -1185,6 +2239,17 @@ function registerButtons() {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
       await submitSavePanel();
+    }
+  });
+  elements.exportFolderInput?.addEventListener("change", async (event) => {
+    const { files } = event.target;
+    try {
+      closeSavePanel();
+      await importFromFileList(files);
+    } catch (error) {
+      reportError(error);
+    } finally {
+      event.target.value = "";
     }
   });
 }

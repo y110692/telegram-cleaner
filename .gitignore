@@ -15,8 +15,8 @@ dist/
 dist_*/
 *.spec
 
-fav_tinder_app/data/
-fav_tinder_app/settings.json
+telegram-cleaner/data/
+telegram-cleaner/settings.json
 
 .DS_Store
 Thumbs.db

@@ -1,26 +1,36 @@
 # Telegram Cleaner
 
-Local Telegram Saved Messages organizer with swipe UI and Obsidian export.
+Локальный browser-first инструмент для разбора экспорта Telegram Saved Messages.
 
-## Features
+Репозиторий: `https://github.com/y110692/telegram-cleaner`
 
-- Tinder-like one-message-at-a-time review flow
-- Telegram-style message rendering for text, links, images, video, voice and files
-- Save messages into tags and export them as Markdown for Obsidian
-- Optional `Pro` mode for collecting candidate `message_id` values for future deletion
-- Native picker for selecting `result.json` from a Telegram export
+## Что умеет
 
-## Run locally
+- показывать сообщения по одному в формате удобного разбора
+- локально отображать текст, ссылки, картинки, аудио, видео и файлы из Telegram export
+- сохранять сообщения в теги и комментарии
+- поддерживать `Pro` режим для пометок на удаление и сбора `message_id`
+- экспортировать сохранённые записи в Markdown-структуру для Obsidian
+- работать с папкой Telegram export целиком, чтобы `result.json` и медиа читались прямо в браузере
+
+## Как запустить
+
+Из корня проекта:
 
 ```powershell
-cd /path/to/telegram-cleaner
-python .\fav_tinder_app\server.py
+.\start_fav_tinder.ps1
 ```
 
-Then open `http://127.0.0.1:8421`.
+После запуска откройте `http://127.0.0.1:8421`, выберите папку с Telegram export и работайте с локальными файлами.
 
-## Build
+## Что хранится локально
 
-- Windows: `build_windows_exe.ps1`
-- macOS: `build_macos_app.sh`
-- GitHub Actions: `.github/workflows/build-app.yml`
+- решения, теги и прогресс: `localStorage` браузера
+- markdown-экспорт: подпапка `telegram-cleaner-export` внутри выбранной пользователем папки
+
+## Приватность
+
+- Python-сервер нужен только для раздачи приложения на `localhost`
+- `result.json` и медиа выбираются пользователем в браузере и не отправляются на сервер
+- предпросмотр медиа работает через локальные `File` и `Blob`
+- для записи markdown в папку нужен Chromium-браузер с поддержкой File System Access API
