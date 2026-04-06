@@ -1724,7 +1724,7 @@ function renderCard() {
     elements.emptyState.classList.remove("hidden");
     elements.emptyTitle.textContent = "Выберите папку экспорта";
     elements.emptyCopy.innerHTML =
-      "Браузер попросит доступ только к выбранной папке.<br />JSON и медиа откроются локально на вашем устройстве<br />и не отправляются на сервер.";
+      "Браузер попросит доступ только к выбранной папке.<br /><br />Файлы откроются локально в вашем браузере,<br />сервер не может видеть и обрабатывать ваши данные.";
     elements.emptyPickExportBtn.classList.remove("hidden");
     elements.emptyDownloadOutputBtn.classList.add("hidden");
     syncStageVerticalAlignment();
