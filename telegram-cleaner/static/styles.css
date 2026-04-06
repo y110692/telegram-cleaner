@@ -138,6 +138,11 @@ textarea {
   text-rendering: geometricPrecision;
 }
 
+.footer-link-button {
+  appearance: none;
+  -webkit-appearance: none;
+}
+
 .settings-toggle {
   display: inline-flex;
   align-items: center;
@@ -235,26 +240,56 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 1.5rem;
+  flex-wrap: wrap;
+  gap: 1.15rem;
+  width: 100%;
   padding: 0.25rem 0 0.35rem;
+  opacity: 0.5;
 }
 
-.brand-link:hover {
-  color: #d7ebff;
+.footer-link,
+.footer-link:link,
+.footer-link:visited {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  color: #d8e6f6;
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1;
+  cursor: pointer;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+}
+
+.footer-link:hover {
+  color: #f5fbff;
+}
+
+.footer-link:focus-visible {
+  outline: 2px solid rgba(99, 180, 255, 0.65);
+  outline-offset: 5px;
+  border-radius: 999px;
 }
 
 .brand-link-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.5rem;
-  height: 1.5rem;
+  width: 1.25rem;
+  height: 1.25rem;
   font-style: normal;
   flex: 0 0 auto;
+  color: inherit;
 }
 
 .brand-link-icon svg {
   display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .brand-divider,
@@ -477,13 +512,6 @@ textarea {
     0 10px 22px rgba(7, 12, 20, 0.24);
 }
 
-.tag-chip.active::before {
-  content: "●";
-  margin-right: 0.45rem;
-  font-size: 0.72em;
-  opacity: 0.9;
-}
-
 .tag-chip.main-tag {
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.22),
@@ -494,6 +522,7 @@ textarea {
 .stage {
   flex: 1 1 auto;
   display: flex;
+  flex-direction: column;
   align-items: stretch;
   justify-content: center;
   min-height: 0;
@@ -539,7 +568,9 @@ textarea {
 
 .footer-divider {
   flex: 0 0 auto;
-  justify-self: center;
+  width: 100%;
+  justify-self: stretch;
+  margin: 0 auto;
 }
 
 .footer-stats {
@@ -569,6 +600,10 @@ textarea {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(13, 22, 35, 0.94);
   box-shadow: var(--shadow);
+}
+
+.privacy-modal {
+  width: min(100%, 34rem);
 }
 
 .settings-modal-header {
@@ -629,6 +664,30 @@ textarea {
   word-break: break-word;
 }
 
+.privacy-copy {
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.98rem;
+  line-height: 1.7;
+}
+
+.privacy-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  color: #9fd0ff;
+}
+
+.privacy-link-icon {
+  width: 0.95rem;
+  height: 0.95rem;
+  fill: currentColor;
+  flex: 0 0 auto;
+}
+
+.privacy-link:hover {
+  color: #d7ebff;
+}
+
 .settings-actions-row {
   display: flex;
   flex-wrap: wrap;
@@ -647,6 +706,14 @@ textarea {
 }
 
 .settings-tag-chip {
+  opacity: 1;
+}
+
+.settings-filter-chip {
+  opacity: 0.78;
+}
+
+.settings-filter-chip.active {
   opacity: 1;
 }
 

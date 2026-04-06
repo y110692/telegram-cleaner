@@ -24,6 +24,7 @@ const state = {
     exportRoot: "",
     outputPath: "",
     defaultTags: [],
+    typeFilters: [],
   },
   settingsDraftTags: [],
   renderedItemId: null,
@@ -40,6 +41,9 @@ const elements = {
   statSkippedWrap: document.getElementById("stat-skipped-wrap"),
   statSaved: document.getElementById("stat-saved"),
   footerStats: document.querySelector(".footer-stats"),
+  openPrivacyBtn: document.getElementById("open-privacy-btn"),
+  privacyModal: document.getElementById("privacy-modal"),
+  closePrivacyBtn: document.getElementById("close-privacy-btn"),
   deleteBtn: document.getElementById("delete-btn"),
   undoCardBtn: document.getElementById("undo-card-btn"),
   stageLayout: document.getElementById("stage-layout"),
@@ -50,6 +54,7 @@ const elements = {
   emptyTitle: document.getElementById("empty-title"),
   emptyCopy: document.getElementById("empty-copy"),
   emptyPickExportBtn: document.getElementById("empty-pick-export-btn"),
+  emptyDownloadOutputBtn: document.getElementById("empty-download-output-btn"),
   messageDate: document.getElementById("message-date"),
   messageSourceWrap: document.getElementById("message-source-wrap"),
   messageSource: document.getElementById("message-source"),
@@ -80,12 +85,25 @@ const elements = {
   pickOutputBtn: document.getElementById("pick-output-btn"),
   openOutputFolderBtn: document.getElementById("open-output-folder-btn"),
   exportFolderInput: document.getElementById("export-folder-input"),
+  settingsTypeFilters: document.getElementById("settings-type-filters"),
   settingsTagsEditor: document.getElementById("settings-tags-editor"),
   settingsTagInput: document.getElementById("settings-tag-input"),
   saveSettingsTagsBtn: document.getElementById("save-settings-tags-btn"),
 };
 
 const DEFAULT_TAGS_FALLBACK = ["мысли", "дневник", "референс", "ссылка", "цитата"];
+const ITEM_TYPE_FILTERS = [
+  { key: "text", label: "Текст" },
+  { key: "link", label: "Ссылки" },
+  { key: "image", label: "Фото" },
+  { key: "video", label: "Видео" },
+  { key: "voice", label: "Голосовые" },
+  { key: "round_video", label: "Кружки" },
+  { key: "audio", label: "Аудио" },
+  { key: "sticker", label: "Стикеры" },
+  { key: "document", label: "Файлы" },
+];
+const ALL_ITEM_TYPE_FILTER_KEYS = ITEM_TYPE_FILTERS.map((entry) => entry.key);
 const STORAGE_KEYS = {
   settings: "fav-tinder.settings.v2",
   decisionsPrefix: "fav-tinder.decisions.v2.",
@@ -94,6 +112,8 @@ const ATTACHMENTS_DIR_NAME = "Вложения";
 const OUTPUT_EXPORT_DIR_NAME = "telegram-cleaner-export";
 const MISSING_FILE_MARKER = "(File exceeds maximum size. Change data exporting settings to download.)";
 const UTF8_ENCODER = new TextEncoder();
+const THANK_YOU_NOTE_TEXT =
+  "Спасибо, что воспользовались Разгребателем Телеги. Надеюсь, он помог навести порядок. Буду рад видеть вас в Telegram: https://t.me/y8ntv и в Instagram: https://instagram.com/y8n\n";
 
 function supportsOutputDirectoryPick() {
   return typeof window.showDirectoryPicker === "function";
@@ -150,6 +170,10 @@ function syncSettingsState(settings = {}) {
   state.exportReady = Boolean(settings.export_ready);
   state.settings.outputPath = String(settings.obsidian_output_path || "");
   state.settings.defaultTags = normalizeSettingsTags(settings.default_tags);
+  state.settings.typeFilters = normalizeTypeFilters(
+    settings.type_filters,
+    !Object.prototype.hasOwnProperty.call(settings, "type_filters"),
+  );
   state.settingsDraftTags = [...state.settings.defaultTags];
   mergeKnownTags(state.settings.defaultTags);
 }
@@ -185,11 +209,33 @@ function normalizeSettingsTags(rawTags) {
   return normalizedTags.length ? normalizedTags : [...DEFAULT_TAGS_FALLBACK];
 }
 
+function normalizeTypeFilters(rawFilters, fallbackToAll = true) {
+  if (!Array.isArray(rawFilters)) {
+    return fallbackToAll ? [...ALL_ITEM_TYPE_FILTER_KEYS] : [];
+  }
+  const normalizedFilters = [];
+  const seen = new Set();
+  for (const rawFilter of rawFilters) {
+    const filterKey = String(rawFilter || "").trim();
+    if (!ALL_ITEM_TYPE_FILTER_KEYS.includes(filterKey) || seen.has(filterKey)) {
+      continue;
+    }
+    seen.add(filterKey);
+    normalizedFilters.push(filterKey);
+  }
+  if (!normalizedFilters.length && fallbackToAll) {
+    return [...ALL_ITEM_TYPE_FILTER_KEYS];
+  }
+  return normalizedFilters;
+}
+
 function storedSettingsPayload() {
   const stored = safeJsonParse(localStorage.getItem(STORAGE_KEYS.settings), {});
+  const hasStoredTypeFilters = Array.isArray(stored.type_filters);
   return {
     pro_mode: Boolean(stored.pro_mode),
     default_tags: normalizeSettingsTags(stored.default_tags),
+    type_filters: normalizeTypeFilters(stored.type_filters, !hasStoredTypeFilters),
   };
 }
 
@@ -210,6 +256,7 @@ function persistSettingsPayload(settings) {
     JSON.stringify({
       pro_mode: Boolean(settings.pro_mode),
       default_tags: normalizeSettingsTags(settings.default_tags),
+      type_filters: normalizeTypeFilters(settings.type_filters, false),
     }),
   );
 }
@@ -910,8 +957,46 @@ function applyTagAccent(node, tag) {
 }
 
 function refreshQueue() {
-  state.queue = state.items.filter((item) => !state.decisions[String(item.id)]);
+  state.queue = state.items.filter((item) => itemMatchesActiveTypeFilters(item) && !state.decisions[String(item.id)]);
   state.currentItem = state.queue[0] || null;
+}
+
+function itemTypeFilterKey(item) {
+  const media = item?.media;
+  if (media) {
+    if (isRoundVideo(media)) {
+      return "round_video";
+    }
+    if (isVoiceMessage(media)) {
+      return "voice";
+    }
+    if (media.kind === "pdf") {
+      return "document";
+    }
+    return media.kind || "document";
+  }
+  if (item?.links?.length) {
+    return "link";
+  }
+  return "text";
+}
+
+function itemMatchesActiveTypeFilters(item, activeFilters = state.settings.typeFilters) {
+  return activeFilters.includes(itemTypeFilterKey(item));
+}
+
+function hiddenByTypeFiltersCount() {
+  return state.items.filter((item) => !state.decisions[String(item.id)] && !itemMatchesActiveTypeFilters(item)).length;
+}
+
+function nextTypeFiltersForToggle(filterKey) {
+  const current = [...state.settings.typeFilters];
+  const isActive = current.includes(filterKey);
+  if (isActive) {
+    return current.filter((entry) => entry !== filterKey);
+  }
+  const next = [...current, filterKey];
+  return ITEM_TYPE_FILTERS.map((entry) => entry.key).filter((entry) => next.includes(entry));
 }
 
 function isProMode() {
@@ -920,6 +1005,10 @@ function isProMode() {
 
 function isSettingsOpen() {
   return !elements.settingsModal.classList.contains("hidden");
+}
+
+function isPrivacyOpen() {
+  return !elements.privacyModal.classList.contains("hidden");
 }
 
 function leftAction() {
@@ -1014,7 +1103,8 @@ function renderStats() {
   const left = state.queue.length;
   const skippedByUser = Object.values(state.decisions).filter((decision) => decision.action === "skip").length;
   const autoSkipped = state.importStats.autoSkipped || 0;
-  const skipped = skippedByUser + autoSkipped;
+  const hiddenByFilters = hiddenByTypeFiltersCount();
+  const skipped = skippedByUser + autoSkipped + hiddenByFilters;
   const saved = Object.values(state.decisions).filter((decision) => decision.action === "save").length;
 
   elements.statTotal.textContent = total;
@@ -1031,6 +1121,9 @@ function renderStats() {
     }
     if (skippedByUser > 0) {
       tooltipParts.push(`Вы пропустили вручную: ${skippedByUser}.`);
+    }
+    if (hiddenByFilters > 0) {
+      tooltipParts.push(`Скрыто фильтрами типов: ${hiddenByFilters}.`);
     }
     if (!tooltipParts.length) {
       tooltipParts.push("Здесь показываются ручные пропуски и авто-скрытые записи без локальных файлов.");
@@ -1074,23 +1167,65 @@ function truncateMiddle(value, maxLength = 74) {
   return `${text.slice(0, left)}…${text.slice(-right)}`;
 }
 
+function normalizeLinkForDisplay(value) {
+  return String(value || "").trim().replace(/\/$/, "");
+}
+
+function formatVisibleLinkText(text, href) {
+  const cleanHref = String(href || "").trim();
+  const cleanText = String(text || "").trim();
+  if (!cleanHref) {
+    return cleanText;
+  }
+  if (!cleanText) {
+    return cleanHref;
+  }
+  const normalizedHref = normalizeLinkForDisplay(cleanHref);
+  const normalizedText = normalizeLinkForDisplay(cleanText);
+  if (normalizedText === normalizedHref || normalizedText === cleanHref) {
+    return cleanHref;
+  }
+  return `${cleanText} -> ${cleanHref}`;
+}
+
 function renderSettingsModal() {
   renderActionButtons();
   elements.settingsExportPath.textContent = truncateMiddle(state.settings.exportJsonPath || "Не выбрана");
   const canPickOutput = supportsOutputDirectoryPick();
+  const canExportArtifacts = state.exportReady && hasExportableArtifacts();
   const outputPathLabel = state.settings.outputPath
     ? `Папка Chrome: ${state.settings.outputPath}. Скачать .zip тоже можно.`
     : canPickOutput
       ? "На любом браузере можно скачать один .zip. В Chrome можно дополнительно писать прямо в локальную папку."
       : "Экспорт доступен как один локальный .zip без доступа к папке.";
-  elements.settingsOutputPath.textContent = truncateMiddle(outputPathLabel);
+  elements.settingsOutputPath.textContent = state.settings.outputPath ? truncateMiddle(outputPathLabel) : outputPathLabel;
   elements.openExportFolderBtn.disabled = !state.exportReady;
   elements.resetProgressBtn.disabled = !state.exportReady;
-  elements.downloadOutputBtn.disabled = !state.exportReady;
+  elements.downloadOutputBtn.disabled = !canExportArtifacts;
   elements.pickOutputBtn.classList.toggle("hidden", !canPickOutput);
   elements.openOutputFolderBtn.classList.toggle("hidden", !canPickOutput);
-  elements.openOutputFolderBtn.disabled = !state.outputHandle || !state.exportReady;
+  elements.openOutputFolderBtn.disabled = !state.outputHandle || !canExportArtifacts;
+  elements.settingsTypeFilters.innerHTML = "";
   elements.settingsTagsEditor.innerHTML = "";
+
+  for (const filter of ITEM_TYPE_FILTERS) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    const isActive = state.settings.typeFilters.includes(filter.key);
+    chip.className = `tag-chip settings-filter-chip ${isActive ? "active" : ""}`;
+    chip.textContent = filter.label;
+    if (isActive) {
+      applyTagAccent(chip, filter.label);
+    }
+    chip.addEventListener("click", async () => {
+      try {
+        await updateSettings({ type_filters: nextTypeFiltersForToggle(filter.key) });
+      } catch (error) {
+        reportError(error);
+      }
+    });
+    elements.settingsTypeFilters.append(chip);
+  }
 
   for (const tag of state.settingsDraftTags) {
     const chip = document.createElement("button");
@@ -1115,6 +1250,14 @@ function openSettingsModal() {
 
 function closeSettingsModal() {
   elements.settingsModal.classList.add("hidden");
+}
+
+function openPrivacyModal() {
+  elements.privacyModal.classList.remove("hidden");
+}
+
+function closePrivacyModal() {
+  elements.privacyModal.classList.add("hidden");
 }
 
 function addSettingsDraftTag(tag) {
@@ -1455,7 +1598,7 @@ function renderSegments(segments) {
       node.href = segment.href;
       node.target = "_blank";
       node.rel = "noreferrer";
-      node.textContent = segment.text;
+      node.textContent = formatVisibleLinkText(segment.text, segment.href);
     } else if (segment.type === "bold") {
       node = document.createElement("strong");
       node.textContent = segment.text;
@@ -1546,7 +1689,12 @@ function renderLinks(item) {
     return;
   }
 
-  const links = item.links.length > 1 ? item.links.slice(1) : [];
+  const links = item.links.filter((link, index) => {
+    if (index > 0) {
+      return true;
+    }
+    return isLinkOnlyMessage(item) || normalizeLinkForDisplay(link.text) !== normalizeLinkForDisplay(link.href);
+  });
   if (!links.length) {
     elements.messageLinks.classList.add("hidden");
     return;
@@ -1559,7 +1707,7 @@ function renderLinks(item) {
     anchor.href = link.href;
     anchor.target = "_blank";
     anchor.rel = "noreferrer";
-    anchor.textContent = link.text || link.href;
+    anchor.textContent = formatVisibleLinkText(link.text, link.href);
     elements.messageLinks.append(anchor);
   }
 }
@@ -1577,6 +1725,7 @@ function renderCard() {
     elements.emptyTitle.textContent = "Выберите папку экспорта";
     elements.emptyCopy.textContent = "Открой папку с экспортом Telegram-чата. JSON и медиа подтянутся локально прямо в браузере.";
     elements.emptyPickExportBtn.classList.remove("hidden");
+    elements.emptyDownloadOutputBtn.classList.add("hidden");
     syncStageVerticalAlignment();
     return;
   }
@@ -1587,14 +1736,21 @@ function renderCard() {
     elements.card.classList.add("hidden");
     elements.swipeHints.classList.add("hidden");
     elements.emptyState.classList.remove("hidden");
-    elements.emptyTitle.textContent = "Очередь закончилась";
-    elements.emptyCopy.textContent = "Все сообщения получили действие. Можно выбрать другой export или продолжить после новых изменений.";
+    if (hiddenByTypeFiltersCount() > 0) {
+      elements.emptyTitle.textContent = "По этим фильтрам пусто";
+      elements.emptyCopy.textContent = "Включи скрытые типы в настройках, чтобы вернуть их в очередь.";
+    } else {
+      elements.emptyTitle.textContent = "Очередь закончилась";
+      elements.emptyCopy.textContent = "Все сообщения получили действие. Можно выбрать другой export или продолжить после новых изменений.";
+    }
     elements.emptyPickExportBtn.classList.add("hidden");
+    elements.emptyDownloadOutputBtn.classList.toggle("hidden", !hasExportableArtifacts());
     syncStageVerticalAlignment();
     return;
   }
 
   elements.emptyState.classList.add("hidden");
+  elements.emptyDownloadOutputBtn.classList.add("hidden");
   elements.card.classList.remove("hidden");
   elements.swipeHints.classList.toggle("hidden", Boolean(state.savePanelItem));
   elements.card.style.transform = "";
@@ -1720,9 +1876,16 @@ async function updateSettings(nextSettings) {
   if (Object.prototype.hasOwnProperty.call(nextSettings, "default_tags")) {
     settings.default_tags = normalizeSettingsTags(nextSettings.default_tags);
   }
+  if (Object.prototype.hasOwnProperty.call(nextSettings, "type_filters")) {
+    settings.type_filters = normalizeTypeFilters(nextSettings.type_filters, false);
+  }
   persistSettingsPayload(settings);
   syncSettingsState(currentSettingsPayload());
+  if (state.savePanelItem && !itemMatchesActiveTypeFilters(state.savePanelItem)) {
+    closeSavePanel();
+  }
   rebuildKnownTags();
+  refreshQueue();
   renderSettingsModal();
   renderSavePanel();
   renderCard();
@@ -1897,6 +2060,9 @@ function buildDeleteCandidatesFiles() {
     .filter(([, decision]) => decision?.action === "delete")
     .map(([messageId]) => Number(messageId))
     .sort((left, right) => left - right);
+  if (!deleteIds.length) {
+    return null;
+  }
 
   const payload = {
     updated_at: new Date().toISOString(),
@@ -1907,7 +2073,7 @@ function buildDeleteCandidatesFiles() {
 
   return {
     json: `${JSON.stringify(payload, null, 2)}\n`,
-    text: deleteIds.length ? `${deleteIds.join("\n")}\n` : "",
+    text: `${deleteIds.join("\n")}\n`,
   };
 }
 
@@ -1926,6 +2092,18 @@ function sortedSavedExportEntries() {
       }
       return left.item.date_iso < right.item.date_iso ? 1 : -1;
     });
+}
+
+function hasExportableArtifacts() {
+  return sortedSavedExportEntries().length > 0 || Boolean(buildDeleteCandidatesFiles());
+}
+
+function buildThankYouArtifact() {
+  return {
+    path: "Спасибо.txt",
+    data: UTF8_ENCODER.encode(THANK_YOU_NOTE_TEXT),
+    modifiedAt: new Date(),
+  };
 }
 
 async function buildExportArtifacts() {
@@ -1979,17 +2157,19 @@ async function buildExportArtifacts() {
   }
 
   const deleteFiles = buildDeleteCandidatesFiles();
-  const generatedAt = new Date();
-  artifacts.push({
-    path: "delete_message_ids.json",
-    data: UTF8_ENCODER.encode(deleteFiles.json),
-    modifiedAt: generatedAt,
-  });
-  artifacts.push({
-    path: "delete_message_ids.txt",
-    data: UTF8_ENCODER.encode(deleteFiles.text),
-    modifiedAt: generatedAt,
-  });
+  if (deleteFiles) {
+    const generatedAt = new Date();
+    artifacts.push({
+      path: "delete_message_ids.json",
+      data: UTF8_ENCODER.encode(deleteFiles.json),
+      modifiedAt: generatedAt,
+    });
+    artifacts.push({
+      path: "delete_message_ids.txt",
+      data: UTF8_ENCODER.encode(deleteFiles.text),
+      modifiedAt: generatedAt,
+    });
+  }
 
   return artifacts;
 }
@@ -2150,10 +2330,14 @@ function triggerDownload(blob, filename) {
 
 async function downloadExportArchive() {
   const artifacts = await buildExportArtifacts();
+  if (!artifacts.length) {
+    throw new Error("Пока нечего экспортировать.");
+  }
   const archiveEntries = artifacts.map((artifact) => ({
     ...artifact,
     path: `${OUTPUT_EXPORT_DIR_NAME}/${artifact.path}`,
   }));
+  archiveEntries.push(buildThankYouArtifact());
   const blob = await buildZipArchive(archiveEntries);
   triggerDownload(blob, buildExportArchiveName());
 }
@@ -2214,6 +2398,9 @@ async function rebuildTagExports() {
   const artifacts = await buildExportArtifacts();
   for (const artifact of artifacts) {
     await writeArtifactToDirectory(exportRoot, artifact);
+  }
+  if (artifacts.length) {
+    await writeArtifactToDirectory(state.outputHandle, buildThankYouArtifact());
   }
 }
 
@@ -2334,6 +2521,13 @@ function registerButtons() {
   elements.saveBtn.addEventListener("click", () => {
     openSavePanel(state.currentItem);
   });
+  elements.openPrivacyBtn.addEventListener("click", openPrivacyModal);
+  elements.closePrivacyBtn.addEventListener("click", closePrivacyModal);
+  elements.privacyModal.addEventListener("click", (event) => {
+    if (event.target === elements.privacyModal) {
+      closePrivacyModal();
+    }
+  });
   elements.openSettingsBtn.addEventListener("click", openSettingsModal);
   elements.closeSettingsBtn.addEventListener("click", closeSettingsModal);
   elements.settingsModal.addEventListener("click", (event) => {
@@ -2365,6 +2559,13 @@ function registerButtons() {
       if (error?.name !== "AbortError") {
         reportError(error);
       }
+    }
+  });
+  elements.emptyDownloadOutputBtn.addEventListener("click", async () => {
+    try {
+      await downloadExportArchive();
+    } catch (error) {
+      reportError(error);
     }
   });
   elements.resetProgressBtn?.addEventListener("click", async () => {
@@ -2515,6 +2716,12 @@ async function undoLastAction() {
 
 function bindKeyboard() {
   window.addEventListener("keydown", async (event) => {
+    if (event.key === "Escape" && isPrivacyOpen()) {
+      event.preventDefault();
+      closePrivacyModal();
+      return;
+    }
+
     if (event.key === "Escape" && isSettingsOpen()) {
       event.preventDefault();
       closeSettingsModal();
