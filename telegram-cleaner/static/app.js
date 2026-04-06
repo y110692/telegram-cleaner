@@ -1717,15 +1717,23 @@ function renderCard() {
   renderUndoButton();
   renderActionButtons();
   resetStageScroll();
+  const isMobileViewport = window.matchMedia("(max-width: 720px)").matches;
   if (!state.exportReady) {
     state.renderedItemId = null;
     elements.card.classList.add("hidden");
     elements.swipeHints.classList.add("hidden");
     elements.emptyState.classList.remove("hidden");
-    elements.emptyTitle.textContent = "Выберите папку экспорта";
-    elements.emptyCopy.innerHTML =
-      "Браузер попросит доступ только к выбранной папке.<br /><br />Файлы откроются локально в вашем браузере,<br />сервер не может видеть и обрабатывать ваши данные.";
-    elements.emptyPickExportBtn.classList.remove("hidden");
+    if (isMobileViewport) {
+      elements.emptyTitle.classList.add("hidden");
+      elements.emptyCopy.textContent = "Полный функционал доступен только с компьютера.";
+      elements.emptyPickExportBtn.classList.add("hidden");
+    } else {
+      elements.emptyTitle.classList.remove("hidden");
+      elements.emptyTitle.textContent = "Выберите папку экспорта";
+      elements.emptyCopy.innerHTML =
+        "Браузер попросит доступ только к выбранной папке.<br /><br />Файлы откроются локально в вашем браузере,<br />сервер не может видеть и обрабатывать ваши данные.";
+      elements.emptyPickExportBtn.classList.remove("hidden");
+    }
     elements.emptyDownloadOutputBtn.classList.add("hidden");
     syncStageVerticalAlignment();
     return;
@@ -1737,6 +1745,7 @@ function renderCard() {
     elements.card.classList.add("hidden");
     elements.swipeHints.classList.add("hidden");
     elements.emptyState.classList.remove("hidden");
+    elements.emptyTitle.classList.remove("hidden");
     if (hiddenByTypeFiltersCount() > 0) {
       elements.emptyTitle.textContent = "По этим фильтрам пусто";
       elements.emptyCopy.textContent = "Включи скрытые типы в настройках, чтобы вернуть их в очередь.";

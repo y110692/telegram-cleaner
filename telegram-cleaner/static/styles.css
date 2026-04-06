@@ -1425,6 +1425,48 @@ textarea {
     padding: 14px;
   }
 
+  .brand {
+    gap: 8px;
+  }
+
+  .brand-kicker {
+    max-width: calc(100% - 1rem);
+    line-height: 1.15;
+  }
+
+  .brand-title-row {
+    display: flex;
+    width: 100%;
+    min-height: 0;
+    padding-right: 0;
+    justify-content: center;
+  }
+
+  .brand-title-row h1 {
+    width: auto;
+    margin: 0;
+    font-size: clamp(1.7rem, 7.3vw, 2.05rem);
+    line-height: 1.08;
+    text-align: center;
+    text-wrap: balance;
+  }
+
+  .settings-toggle {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .settings-toggle:hover,
+  .settings-toggle:focus-visible {
+    transform: translateY(-50%);
+  }
+
+  .settings-toggle {
+    display: none;
+  }
+
   .sidebar,
   .message-card {
     border-radius: 24px;
@@ -1471,5 +1513,50 @@ textarea {
   .hint-button {
     min-width: 0;
     flex: 1 1 0;
+  }
+
+  .empty-state {
+    width: 100%;
+    padding: 28px 22px;
+    border-radius: 26px;
+  }
+
+  .empty-title {
+    margin-bottom: 12px;
+    font-size: 1.48rem;
+    line-height: 1.12;
+    text-wrap: balance;
+  }
+
+  .empty-state p {
+    margin: 0 auto;
+    max-width: 17rem;
+    line-height: 1.5;
+    text-wrap: pretty;
+  }
+
+  .empty-state .primary-button,
+  .empty-state .ghost-button {
+    width: 100%;
+    max-width: 16rem;
+    margin-top: 1.2rem;
+  }
+
+  .footer-links {
+    gap: 0.8rem 1rem;
+    padding-top: 0.1rem;
+  }
+
+  .footer-link {
+    font-size: 0.95rem;
+  }
+
+  .footer-link-privacy {
+    order: 2;
+    flex: 0 0 100%;
+  }
+
+  .footer-link:not(.footer-link-privacy) {
+    order: 1;
   }
 }
