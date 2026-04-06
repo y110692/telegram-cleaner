@@ -76,6 +76,7 @@ const elements = {
   pickExportBtn: document.getElementById("pick-export-btn"),
   openExportFolderBtn: document.getElementById("open-export-folder-btn"),
   resetProgressBtn: document.getElementById("reset-progress-btn"),
+  downloadOutputBtn: document.getElementById("download-output-btn"),
   pickOutputBtn: document.getElementById("pick-output-btn"),
   openOutputFolderBtn: document.getElementById("open-output-folder-btn"),
   exportFolderInput: document.getElementById("export-folder-input"),
@@ -92,6 +93,11 @@ const STORAGE_KEYS = {
 const ATTACHMENTS_DIR_NAME = "Вложения";
 const OUTPUT_EXPORT_DIR_NAME = "telegram-cleaner-export";
 const MISSING_FILE_MARKER = "(File exceeds maximum size. Change data exporting settings to download.)";
+const UTF8_ENCODER = new TextEncoder();
+
+function supportsOutputDirectoryPick() {
+  return typeof window.showDirectoryPicker === "function";
+}
 
 function escapeHtml(value) {
   return String(value)
@@ -1071,11 +1077,18 @@ function truncateMiddle(value, maxLength = 74) {
 function renderSettingsModal() {
   renderActionButtons();
   elements.settingsExportPath.textContent = truncateMiddle(state.settings.exportJsonPath || "Не выбрана");
-  elements.settingsOutputPath.textContent = truncateMiddle(
-    state.settings.outputPath || "Не выбрана. После выбора markdown и вложения будут писаться локально.",
-  );
+  const canPickOutput = supportsOutputDirectoryPick();
+  const outputPathLabel = state.settings.outputPath
+    ? `Папка Chrome: ${state.settings.outputPath}. Скачать .zip тоже можно.`
+    : canPickOutput
+      ? "На любом браузере можно скачать один .zip. В Chrome можно дополнительно писать прямо в локальную папку."
+      : "Экспорт доступен как один локальный .zip без доступа к папке.";
+  elements.settingsOutputPath.textContent = truncateMiddle(outputPathLabel);
   elements.openExportFolderBtn.disabled = !state.exportReady;
   elements.resetProgressBtn.disabled = !state.exportReady;
+  elements.downloadOutputBtn.disabled = !state.exportReady;
+  elements.pickOutputBtn.classList.toggle("hidden", !canPickOutput);
+  elements.openOutputFolderBtn.classList.toggle("hidden", !canPickOutput);
   elements.openOutputFolderBtn.disabled = !state.outputHandle || !state.exportReady;
   elements.settingsTagsEditor.innerHTML = "";
 
@@ -1879,6 +1892,272 @@ function renderNote(item, tags, mediaFiles, comment) {
   return `${lines.join("\n").trim()}\n`;
 }
 
+function buildDeleteCandidatesFiles() {
+  const deleteIds = Object.entries(state.decisions)
+    .filter(([, decision]) => decision?.action === "delete")
+    .map(([messageId]) => Number(messageId))
+    .sort((left, right) => left - right);
+
+  const payload = {
+    updated_at: new Date().toISOString(),
+    export_root: state.exportMeta.label,
+    export_json_path: state.exportMeta.label ? `${state.exportMeta.label}/result.json` : "result.json",
+    message_ids: deleteIds,
+  };
+
+  return {
+    json: `${JSON.stringify(payload, null, 2)}\n`,
+    text: deleteIds.length ? `${deleteIds.join("\n")}\n` : "",
+  };
+}
+
+function sortedSavedExportEntries() {
+  const itemsById = new Map(state.items.map((item) => [String(item.id), item]));
+  return Object.entries(state.decisions)
+    .filter(([, decision]) => decision?.action === "save")
+    .map(([messageId, decision]) => ({
+      item: itemsById.get(String(messageId)),
+      decision,
+    }))
+    .filter((entry) => entry.item && Array.isArray(entry.decision.tags) && entry.decision.tags.length)
+    .sort((left, right) => {
+      if (left.item.date_iso === right.item.date_iso) {
+        return right.item.id - left.item.id;
+      }
+      return left.item.date_iso < right.item.date_iso ? 1 : -1;
+    });
+}
+
+async function buildExportArtifacts() {
+  const artifacts = [];
+
+  for (const { item, decision } of sortedSavedExportEntries()) {
+    const tags = decision.tags || [];
+    const mainTag = tags[0];
+    const tagFolder = slugifyTag(mainTag);
+    const attachmentsDir = `${tagFolder}/${ATTACHMENTS_DIR_NAME}`;
+
+    const media = item.media;
+    const mediaFiles = {};
+    if (media && !media.missing) {
+      if (media.source_path) {
+        const sourceFile = getFileByRelativePath(media.source_path);
+        if (sourceFile) {
+          const safeName = safePathComponent(sourceFile.name, `${item.id}`);
+          const targetName = `${item.id}_${safeName}`;
+          mediaFiles.main = targetName;
+          artifacts.push({
+            path: `${attachmentsDir}/${targetName}`,
+            data: sourceFile,
+            modifiedAt: sourceFile.lastModified ? new Date(sourceFile.lastModified) : new Date(item.date_iso),
+          });
+        }
+      }
+
+      if (media.preview_path && media.preview_path !== media.source_path) {
+        const previewFile = getFileByRelativePath(media.preview_path);
+        if (previewFile) {
+          const safeName = safePathComponent(previewFile.name, `${item.id}_preview`);
+          const targetName = `${item.id}_${safeName}`;
+          mediaFiles.preview = targetName;
+          artifacts.push({
+            path: `${attachmentsDir}/${targetName}`,
+            data: previewFile,
+            modifiedAt: previewFile.lastModified ? new Date(previewFile.lastModified) : new Date(item.date_iso),
+          });
+        }
+      }
+    }
+
+    const noteName = `${makeNoteStem(item)}.md`;
+    const noteContent = renderNote(item, tags, mediaFiles, String(decision.comment || "").trim());
+    artifacts.push({
+      path: `${tagFolder}/${noteName}`,
+      data: UTF8_ENCODER.encode(noteContent),
+      modifiedAt: new Date(item.date_iso || Date.now()),
+    });
+  }
+
+  const deleteFiles = buildDeleteCandidatesFiles();
+  const generatedAt = new Date();
+  artifacts.push({
+    path: "delete_message_ids.json",
+    data: UTF8_ENCODER.encode(deleteFiles.json),
+    modifiedAt: generatedAt,
+  });
+  artifacts.push({
+    path: "delete_message_ids.txt",
+    data: UTF8_ENCODER.encode(deleteFiles.text),
+    modifiedAt: generatedAt,
+  });
+
+  return artifacts;
+}
+
+async function toUint8Array(value) {
+  if (value instanceof Uint8Array) {
+    return value;
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  if (value instanceof Blob) {
+    return new Uint8Array(await value.arrayBuffer());
+  }
+  if (typeof value === "string") {
+    return UTF8_ENCODER.encode(value);
+  }
+  throw new Error("Не удалось подготовить данные для экспорта");
+}
+
+function zipTimestampParts(rawDate) {
+  const parsed = rawDate instanceof Date ? rawDate : new Date(rawDate || Date.now());
+  const date = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  const clampedYear = Math.min(Math.max(date.getFullYear(), 1980), 2107);
+  const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
+  const dosDate = ((clampedYear - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+  return { dosDate, dosTime };
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < 256; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (let index = 0; index < bytes.length; index += 1) {
+    crc = CRC32_TABLE[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+async function buildZipArchive(entries) {
+  const localChunks = [];
+  const centralChunks = [];
+  let localSize = 0;
+  let centralSize = 0;
+  let offset = 0;
+  let entryCount = 0;
+
+  for (const entry of entries) {
+    const relativePath = normalizeRelativePath(entry.path);
+    if (!relativePath) {
+      continue;
+    }
+
+    const fileNameBytes = UTF8_ENCODER.encode(relativePath);
+    const fileBytes = await toUint8Array(entry.data);
+    const checksum = crc32(fileBytes);
+    const { dosDate, dosTime } = zipTimestampParts(entry.modifiedAt);
+
+    const localHeader = new ArrayBuffer(30);
+    const localView = new DataView(localHeader);
+    localView.setUint32(0, 0x04034b50, true);
+    localView.setUint16(4, 20, true);
+    localView.setUint16(6, 0x0800, true);
+    localView.setUint16(8, 0, true);
+    localView.setUint16(10, dosTime, true);
+    localView.setUint16(12, dosDate, true);
+    localView.setUint32(14, checksum, true);
+    localView.setUint32(18, fileBytes.length, true);
+    localView.setUint32(22, fileBytes.length, true);
+    localView.setUint16(26, fileNameBytes.length, true);
+    localView.setUint16(28, 0, true);
+
+    localChunks.push(new Uint8Array(localHeader), fileNameBytes, fileBytes);
+    localSize += 30 + fileNameBytes.length + fileBytes.length;
+
+    const centralHeader = new ArrayBuffer(46);
+    const centralView = new DataView(centralHeader);
+    centralView.setUint32(0, 0x02014b50, true);
+    centralView.setUint16(4, 20, true);
+    centralView.setUint16(6, 20, true);
+    centralView.setUint16(8, 0x0800, true);
+    centralView.setUint16(10, 0, true);
+    centralView.setUint16(12, dosTime, true);
+    centralView.setUint16(14, dosDate, true);
+    centralView.setUint32(16, checksum, true);
+    centralView.setUint32(20, fileBytes.length, true);
+    centralView.setUint32(24, fileBytes.length, true);
+    centralView.setUint16(28, fileNameBytes.length, true);
+    centralView.setUint16(30, 0, true);
+    centralView.setUint16(32, 0, true);
+    centralView.setUint16(34, 0, true);
+    centralView.setUint16(36, 0, true);
+    centralView.setUint32(38, 0, true);
+    centralView.setUint32(42, offset, true);
+
+    centralChunks.push(new Uint8Array(centralHeader), fileNameBytes);
+    centralSize += 46 + fileNameBytes.length;
+    offset += 30 + fileNameBytes.length + fileBytes.length;
+    entryCount += 1;
+  }
+
+  const endRecord = new ArrayBuffer(22);
+  const endView = new DataView(endRecord);
+  endView.setUint32(0, 0x06054b50, true);
+  endView.setUint16(4, 0, true);
+  endView.setUint16(6, 0, true);
+  endView.setUint16(8, entryCount, true);
+  endView.setUint16(10, entryCount, true);
+  endView.setUint32(12, centralSize, true);
+  endView.setUint32(16, localSize, true);
+  endView.setUint16(20, 0, true);
+
+  return new Blob([...localChunks, ...centralChunks, new Uint8Array(endRecord)], {
+    type: "application/zip",
+  });
+}
+
+function buildExportArchiveName() {
+  const now = new Date();
+  const stamp = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+    "_",
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+  ].join("");
+  return `${OUTPUT_EXPORT_DIR_NAME}_${stamp}.zip`;
+}
+
+function triggerDownload(blob, filename) {
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  anchor.rel = "noreferrer";
+  anchor.style.display = "none";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => {
+    URL.revokeObjectURL(objectUrl);
+  }, 2000);
+}
+
+async function downloadExportArchive() {
+  const artifacts = await buildExportArtifacts();
+  const archiveEntries = artifacts.map((artifact) => ({
+    ...artifact,
+    path: `${OUTPUT_EXPORT_DIR_NAME}/${artifact.path}`,
+  }));
+  const blob = await buildZipArchive(archiveEntries);
+  triggerDownload(blob, buildExportArchiveName());
+}
+
 async function ensureDirectory(parentHandle, name) {
   return parentHandle.getDirectoryHandle(name, { create: true });
 }
@@ -1893,46 +2172,36 @@ async function clearDirectoryHandle(handle) {
   }
 }
 
-async function writeTextFile(handle, name, content) {
+async function writeBinaryFile(handle, name, data) {
   const fileHandle = await handle.getFileHandle(name, { create: true });
   const writable = await fileHandle.createWritable();
-  await writable.write(content);
-  await writable.close();
-}
-
-async function writeBinaryFile(handle, name, file) {
-  const fileHandle = await handle.getFileHandle(name, { create: true });
-  const writable = await fileHandle.createWritable();
-  await writable.write(await file.arrayBuffer());
-  await writable.close();
-}
-
-async function copyAsset(relativePath, targetDir, messageId) {
-  const sourceFile = getFileByRelativePath(relativePath);
-  if (!sourceFile) {
-    return null;
+  if (data instanceof Uint8Array) {
+    await writable.write(data);
+  } else if (data instanceof ArrayBuffer) {
+    await writable.write(data);
+  } else if (ArrayBuffer.isView(data)) {
+    await writable.write(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  } else if (data instanceof Blob) {
+    await writable.write(await data.arrayBuffer());
+  } else if (typeof data === "string") {
+    await writable.write(data);
+  } else {
+    throw new Error("Не удалось записать бинарный файл");
   }
-  const safeName = safePathComponent(sourceFile.name, `${messageId}`);
-  const targetName = `${messageId}_${safeName}`;
-  await writeBinaryFile(targetDir, targetName, sourceFile);
-  return targetName;
+  await writable.close();
 }
 
-async function rebuildDeleteCandidates(rootHandle) {
-  const deleteIds = Object.entries(state.decisions)
-    .filter(([, decision]) => decision?.action === "delete")
-    .map(([messageId]) => Number(messageId))
-    .sort((left, right) => left - right);
-
-  const payload = {
-    updated_at: new Date().toISOString(),
-    export_root: state.exportMeta.label,
-    export_json_path: state.exportMeta.label ? `${state.exportMeta.label}/result.json` : "result.json",
-    message_ids: deleteIds,
-  };
-  await writeTextFile(rootHandle, "delete_message_ids.json", `${JSON.stringify(payload, null, 2)}\n`);
-  const textContent = deleteIds.length ? `${deleteIds.join("\n")}\n` : "";
-  await writeTextFile(rootHandle, "delete_message_ids.txt", textContent);
+async function writeArtifactToDirectory(rootHandle, artifact) {
+  const pathParts = normalizeRelativePath(artifact.path).split("/").filter(Boolean);
+  if (!pathParts.length) {
+    return;
+  }
+  const fileName = pathParts.pop();
+  let currentHandle = rootHandle;
+  for (const segment of pathParts) {
+    currentHandle = await ensureDirectory(currentHandle, segment);
+  }
+  await writeBinaryFile(currentHandle, fileName, artifact.data);
 }
 
 async function rebuildTagExports() {
@@ -1942,50 +2211,10 @@ async function rebuildTagExports() {
 
   const exportRoot = await ensureDirectory(state.outputHandle, OUTPUT_EXPORT_DIR_NAME);
   await clearDirectoryHandle(exportRoot);
-
-  const savedEntries = Object.entries(state.decisions)
-    .filter(([, decision]) => decision?.action === "save")
-    .map(([messageId, decision]) => ({
-      item: state.items.find((candidate) => candidate.id === Number(messageId)),
-      decision,
-    }))
-    .filter((entry) => entry.item && Array.isArray(entry.decision.tags) && entry.decision.tags.length)
-    .sort((left, right) => {
-      if (left.item.date_iso === right.item.date_iso) {
-        return right.item.id - left.item.id;
-      }
-      return left.item.date_iso < right.item.date_iso ? 1 : -1;
-    });
-
-  for (const { item, decision } of savedEntries) {
-    const tags = decision.tags || [];
-    const mainTag = tags[0];
-    const tagFolder = await ensureDirectory(exportRoot, slugifyTag(mainTag));
-    const attachmentsDir = await ensureDirectory(tagFolder, ATTACHMENTS_DIR_NAME);
-
-    const media = item.media;
-    const mediaFiles = {};
-    if (media && !media.missing) {
-      if (media.source_path) {
-        const copiedMain = await copyAsset(media.source_path, attachmentsDir, item.id);
-        if (copiedMain) {
-          mediaFiles.main = copiedMain;
-        }
-      }
-      if (media.preview_path && media.preview_path !== media.source_path) {
-        const copiedPreview = await copyAsset(media.preview_path, attachmentsDir, item.id);
-        if (copiedPreview) {
-          mediaFiles.preview = copiedPreview;
-        }
-      }
-    }
-
-    const noteName = `${makeNoteStem(item)}.md`;
-    const noteContent = renderNote(item, tags, mediaFiles, String(decision.comment || "").trim());
-    await writeTextFile(tagFolder, noteName, noteContent);
+  const artifacts = await buildExportArtifacts();
+  for (const artifact of artifacts) {
+    await writeArtifactToDirectory(exportRoot, artifact);
   }
-
-  await rebuildDeleteCandidates(exportRoot);
 }
 
 async function maybeRebuildOutput() {
@@ -2152,10 +2381,17 @@ function registerButtons() {
     renderSavePanel();
     renderSettingsModal();
   });
+  elements.downloadOutputBtn.addEventListener("click", async () => {
+    try {
+      await downloadExportArchive();
+    } catch (error) {
+      reportError(error);
+    }
+  });
   elements.pickOutputBtn.addEventListener("click", async () => {
     try {
-      if (typeof window.showDirectoryPicker !== "function") {
-        throw new Error("Для локального markdown-экспорта нужен браузер Chromium с File System Access API");
+      if (!supportsOutputDirectoryPick()) {
+        throw new Error("Этот браузер не умеет писать прямо в папку. Используйте кнопку «Скачать .zip».");
       }
       const handle = await window.showDirectoryPicker({
         id: "telegram-cleaner-output",
@@ -2175,6 +2411,9 @@ function registerButtons() {
   });
   elements.openOutputFolderBtn.addEventListener("click", async () => {
     try {
+      if (!state.outputHandle) {
+        throw new Error("Сначала выберите папку для Chrome или скачайте .zip.");
+      }
       await rebuildTagExports();
     } catch (error) {
       reportError(error);

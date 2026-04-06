@@ -3,6 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; connect-src 'none'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    />
+    <meta name="referrer" content="no-referrer" />
     <title>Разгребатель Телеги</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -180,12 +185,13 @@
 
         <section class="settings-section">
           <div class="settings-section-head">
-            <div class="settings-section-title">Локальный markdown-экспорт</div>
+            <div class="settings-section-title">Экспорт заметок</div>
             <div id="settings-output-path" class="settings-path">Не выбрана</div>
           </div>
           <div class="settings-actions-row">
-            <button id="pick-output-btn" type="button" class="ghost-button">Выбрать папку</button>
-            <button id="open-output-folder-btn" type="button" class="ghost-button">Экспортировать сейчас</button>
+            <button id="download-output-btn" type="button" class="primary-button">Скачать .zip</button>
+            <button id="pick-output-btn" type="button" class="ghost-button">Папка Chrome</button>
+            <button id="open-output-folder-btn" type="button" class="ghost-button">Обновить папку</button>
           </div>
         </section>
 
